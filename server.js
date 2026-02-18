@@ -63,11 +63,17 @@ app.post(
       const attrs = data?.attributes || {};
 
       // Save raw event for debugging
-      await pool.query(
-        `insert into webhook_events (event_name, payload_json)
-         values ($1, $2)`,
-        [eventName || "unknown", JSON.stringify(payload)]
-      );
+      try {
+    await pool.query(
+    `insert into webhook_events (event_name, payload_json)
+     values ($1, $2)`,
+    [eventName || "unknown", JSON.stringify(payload)]
+  );
+    } catch (e) {
+      console.error("webhook_events insert failed:", e?.message);
+      // DO NOT crash the webhook just because logging failed
+    }
+
 
       // Extract variant ID
       const variantId =
@@ -103,7 +109,7 @@ app.post(
 
       return res.status(200).json({ ok: true });
     } catch (err) {
-      console.error("Webhook error:", err);
+      console.error("Webhook error:", err?.stack || err);
       return res.status(500).send("Server error");
     }
   }
