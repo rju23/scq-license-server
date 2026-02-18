@@ -11,6 +11,7 @@ import pg from "pg";
 const { Pool } = pg;
 
 const app = express();
+app.use(express.json({ limit: "1mb" }));
 const PORT = process.env.PORT || 3000;
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -99,57 +100,147 @@ function verifyLemonSignature(rawBodyBuf, signatureHeader) {
   return crypto.timingSafeEqual(digBuf, sigBuf);
 }
 
-// ---------- Routes ----------
+
+// Validate license (does NOT consume a device slot)
 app.get("/health", (_req, res) => res.json({ ok: true }));
-
-app.post("/webhooks/lemonsqueezy", express.raw({ type: "application/json" }), async (req, res) => {
+app.post("/v1/license/validate", async (req, res) => {
   try {
-    const signature = req.get("X-Signature");
-    if (!verifyLemonSignature(req.body, signature)) {
-      return res.status(401).send("Invalid signature");
+    const licenseKey = String(req.body?.licenseKey || "").trim();
+    if (!licenseKey) return res.status(400).json({ ok: false, error: "licenseKey required" });
+
+    const r = await db(
+      `select license_key, plan, status, expires_at, max_devices
+       from public.licenses
+       where license_key = $1
+       limit 1`,
+      [licenseKey]
+    );
+
+    if (!r.rows.length) return res.status(404).json({ ok: false, error: "License not found" });
+
+    const lic = r.rows[0];
+    if (String(lic.status).toLowerCase() !== "active") {
+      return res.status(403).json({ ok: false, error: "License inactive" });
+    }
+    if (lic.expires_at && new Date(lic.expires_at).getTime() <= Date.now()) {
+      return res.status(403).json({ ok: false, error: "License expired", expiresAt: lic.expires_at });
     }
 
-    const payload = JSON.parse(req.body.toString("utf8"));
-    const eventName = payload?.meta?.event_name || "unknown";
-    const data = payload?.data || {};
-    const attrs = data?.attributes || {};
+    const usedR = await db(
+      `select count(*)::int as c
+       from public.activations
+       where license_key = $1`,
+      [licenseKey]
+    );
 
-    // Best-effort logging: DO NOT fail the webhook if logging fails
-    try {
-      await db(
-        `insert into public.webhook_events (event_name, payload_json)
-         values ($1, $2::jsonb)`,
-        [eventName, JSON.stringify(payload)]
-      );
-    } catch (e) {
-      console.error("webhook_events insert failed (ignored):", e?.message || e);
-    }
+    const used = usedR.rows[0]?.c ?? 0;
+    const max = Number(lic.max_devices ?? 1);
 
-    // Extract common fields
-    const email = safeLower(attrs?.user_email);
-    const variantId =
-      attrs?.first_order_item?.variant_id ??
-      attrs?.variant_id ??
-      attrs?.first_subscription_item?.variant_id ?? // sometimes present
-      0;
-
-    // If no email, we can’t associate a license. Still return OK to prevent retries.
-    if (!email) return res.status(200).json({ ok: true });
-
-    if (eventName === "order_created") {
-      await handleOrderCreated({ email, variantId, attrs });
-    } else if (eventName === "subscription_created" || eventName === "subscription_updated") {
-      await handleSubscriptionUpsert({ email, variantId, attrs });
-    } else if (eventName === "subscription_cancelled" || eventName === "subscription_expired") {
-      await handleSubscriptionEnded({ attrs });
-    }
-
-    return res.status(200).json({ ok: true });
-  } catch (err) {
-    console.error("Webhook error:", err?.stack || err);
-    return res.status(500).send("Server error");
+    return res.json({
+      ok: true,
+      plan: lic.plan,
+      status: lic.status,
+      expiresAt: lic.expires_at,
+      maxDevices: max,
+      usedDevices: used,
+      remainingDevices: max === -1 ? 999999 : Math.max(0, max - used),
+      serverTime: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("validate error:", e?.stack || e);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
+
+
+// Activate device (creates/updates a row in public.activations)
+app.post("/v1/license/activate", async (req, res) => {
+  try {
+    const licenseKey = String(req.body?.licenseKey || "").trim();
+    const deviceId = String(req.body?.deviceId || "").trim();
+    const deviceLabel = String(req.body?.deviceLabel || "").trim() || null;
+
+    if (!licenseKey) return res.status(400).json({ ok: false, error: "licenseKey required" });
+    if (!deviceId) return res.status(400).json({ ok: false, error: "deviceId required" });
+
+    const lr = await db(
+      `select plan, status, expires_at, max_devices
+       from public.licenses
+       where license_key = $1
+       limit 1`,
+      [licenseKey]
+    );
+
+    if (!lr.rows.length) return res.status(404).json({ ok: false, error: "License not found" });
+    const lic = lr.rows[0];
+
+    if (String(lic.status).toLowerCase() !== "active") {
+      return res.status(403).json({ ok: false, error: "License inactive" });
+    }
+    if (lic.expires_at && new Date(lic.expires_at).getTime() <= Date.now()) {
+      return res.status(403).json({ ok: false, error: "License expired", expiresAt: lic.expires_at });
+    }
+
+    const max = Number(lic.max_devices ?? 1);
+
+    // already activated?
+    const ex = await db(
+      `select id
+       from public.activations
+       where license_key=$1 and device_id=$2
+       limit 1`,
+      [licenseKey, deviceId]
+    );
+
+    if (!ex.rows.length) {
+      const usedR = await db(
+        `select count(*)::int as c
+         from public.activations
+         where license_key=$1`,
+        [licenseKey]
+      );
+      const used = usedR.rows[0]?.c ?? 0;
+
+      if (max !== -1 && used >= max) {
+        return res.status(403).json({ ok: false, error: "Device limit reached", maxDevices: max, usedDevices: used });
+      }
+
+      await db(
+        `insert into public.activations (license_key, device_id, device_label, last_seen_at)
+         values ($1,$2,$3,now())`,
+        [licenseKey, deviceId, deviceLabel]
+      );
+    } else {
+      await db(
+        `update public.activations
+         set last_seen_at=now(), device_label=coalesce($3, device_label)
+         where license_key=$1 and device_id=$2`,
+        [licenseKey, deviceId, deviceLabel]
+      );
+    }
+
+    const used2R = await db(
+      `select count(*)::int as c
+       from public.activations
+       where license_key=$1`,
+      [licenseKey]
+    );
+    const used2 = used2R.rows[0]?.c ?? 0;
+
+    return res.json({
+      ok: true,
+      plan: lic.plan,
+      maxDevices: max,
+      usedDevices: used2,
+      remainingDevices: max === -1 ? 999999 : Math.max(0, max - used2),
+      serverTime: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("activate error:", e?.stack || e);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+
 
 // ---------- Handlers ----------
 async function handleOrderCreated({ email, variantId, attrs }) {
