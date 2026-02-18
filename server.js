@@ -9,6 +9,8 @@ import crypto from "node:crypto";
 import pg from "pg";
 import {Resend} from "resend";
 
+console.log("RESEND KEY PRESENT:", !!process.env.RESEND_API_KEY);
+
 const { Pool } = pg;
 
 // ---------- Email (Resend API) ----------
