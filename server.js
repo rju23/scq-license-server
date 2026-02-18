@@ -7,8 +7,73 @@
 import express from "express";
 import crypto from "node:crypto";
 import pg from "pg";
+import nodemailer from "nodemailer";
 
 const { Pool } = pg;
+
+const APP_NAME = process.env.APP_NAME || "SCQ Scoreboard";
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || process.env.MAIL_FROM || "";
+
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const MAIL_FROM = process.env.MAIL_FROM;
+
+let mailer = null;
+
+if (SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM) {
+  mailer = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465, // true for 465, false for 587
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+} else {
+  console.warn("Email not configured (SMTP_* / MAIL_FROM missing). License emails will NOT send.");
+}
+
+function planLabel(plan) {
+  switch (plan) {
+    case "individual_monthly": return "Individual (Monthly)";
+    case "individual_yearly": return "Individual (Yearly)";
+    case "school_yearly": return "School (Yearly)";
+    case "rally_3day": return "Rally (3-day)";
+    default: return plan || "Unknown";
+  }
+}
+
+async function sendLicenseEmail({ to, licenseKey, plan, maxDevices }) {
+  if (!mailer) return;
+
+  const subject = `${APP_NAME} — Your License Key`;
+  const text =
+`${APP_NAME}
+
+Thanks for your purchase.
+
+License key:
+${licenseKey}
+
+Plan: ${planLabel(plan)}
+Devices allowed: ${maxDevices === -1 ? "Unlimited" : maxDevices}
+
+How to activate:
+1) Open the app
+2) Enter the license key when prompted
+3) Click Activate on this device
+
+Need help? ${SUPPORT_EMAIL || "Reply to this email."}
+`;
+
+  await mailer.sendMail({
+    from: MAIL_FROM,
+    to,
+    subject,
+    text,
+  });
+}
+
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -265,13 +330,27 @@ async function handleOrderCreated({ email, variantId, attrs }) {
 
   const sourceId = String(attrs?.identifier || attrs?.order_number || attrs?.id || "");
 
-  const license = await createLicenseOrReturnExisting({
-    email,
-    plan: mapped.plan,
-    maxDevices: mapped.maxDevices,
-    source: "order",
-    sourceId,
+  const { license, created } = await createLicenseOrReturnExisting({
+  email,
+  plan: mapped.plan,
+  maxDevices: mapped.maxDevices,
+  source: "order",
+  sourceId,
   });
+
+  if (created) {
+    try {
+      await sendLicenseEmail({
+        to: email,
+        licenseKey: license.license_key,
+        plan: license.plan,
+        maxDevices: license.max_devices,
+      });
+    } catch (e) {
+      console.error("Failed to send license email (order):", e?.message || e);
+    }
+}
+
 
   // Rally: 3-day usage, must be activated within 7 days of purchase
   if (mapped.plan === "rally_3day") {
@@ -296,13 +375,27 @@ async function handleSubscriptionUpsert({ email, variantId, attrs }) {
   }
 
   const subId = String(attrs?.id || "");
-  const license = await createLicenseOrReturnExisting({
-    email,
-    plan: mapped.plan,
-    maxDevices: mapped.maxDevices,
-    source: "subscription",
-    sourceId: subId,
+  const { license, created } = await createLicenseOrReturnExisting({
+  email,
+  plan: mapped.plan,
+  maxDevices: mapped.maxDevices,
+  source: "subscription",
+  sourceId: subId,
   });
+
+  if (created) {
+    try {
+      await sendLicenseEmail({
+        to: email,
+        licenseKey: license.license_key,
+        plan: license.plan,
+        maxDevices: license.max_devices,
+      });
+    } catch (e) {
+      console.error("Failed to send license email (subscription):", e?.message || e);
+    }
+}
+
 
   const status = String(attrs?.status || "").toLowerCase();
   const renewsAt = attrs?.renews_at ? new Date(attrs.renews_at) : null;
@@ -347,7 +440,7 @@ async function createLicenseOrReturnExisting({ email, plan, maxDevices, source, 
        limit 1`,
       [source, sourceId]
     );
-    if (bySource.rows.length) return bySource.rows[0];
+    if (bySource.rows.length) return { license: bySource.rows[0], created: false };
   }
 
   // 2) Existing active by email+plan (prevents duplicates on repeated webhooks)
@@ -358,7 +451,7 @@ async function createLicenseOrReturnExisting({ email, plan, maxDevices, source, 
      limit 1`,
     [email, plan]
   );
-  if (existing.rows.length) return existing.rows[0];
+  if (existing.rows.length) return { license: existing.rows[0], created: false };
 
   // 3) Create new
   const key = generateLicenseKey();
@@ -369,8 +462,10 @@ async function createLicenseOrReturnExisting({ email, plan, maxDevices, source, 
      returning *`,
     [key, email, plan, Number(maxDevices), source || null, sourceId || null]
   );
-  return ins.rows[0];
+
+  return { license: ins.rows[0], created: true };
 }
+
 
 // ---------- License Validation (for app activation) ----------
 app.post("/api/validate-license", express.json(), async (req, res) => {
