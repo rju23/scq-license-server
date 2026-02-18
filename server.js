@@ -7,31 +7,17 @@
 import express from "express";
 import crypto from "node:crypto";
 import pg from "pg";
-import nodemailer from "nodemailer";
+import {Resend} from "resend";
 
 const { Pool } = pg;
 
+// ---------- Email (Resend API) ----------
 const APP_NAME = process.env.APP_NAME || "SCQ Scoreboard";
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || process.env.MAIL_FROM || "";
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "";
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const MAIL_FROM = process.env.MAIL_FROM || "SCQ Scoreboard <onboarding@resend.dev>";
 
-const SMTP_HOST = process.env.SMTP_HOST;
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
-const MAIL_FROM = process.env.MAIL_FROM;
-
-let mailer = null;
-
-if (SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM) {
-  mailer = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_PORT === 465, // true for 465, false for 587
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-} else {
-  console.warn("Email not configured (SMTP_* / MAIL_FROM missing). License emails will NOT send.");
-}
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 function planLabel(plan) {
   switch (plan) {
@@ -44,9 +30,13 @@ function planLabel(plan) {
 }
 
 async function sendLicenseEmail({ to, licenseKey, plan, maxDevices }) {
-  if (!mailer) return;
+  if (!resend) {
+    console.warn("RESEND_API_KEY missing; email will not send.");
+    return;
+  }
 
   const subject = `${APP_NAME} — Your License Key`;
+
   const text =
 `${APP_NAME}
 
@@ -61,19 +51,20 @@ Devices allowed: ${maxDevices === -1 ? "Unlimited" : maxDevices}
 How to activate:
 1) Open the app
 2) Enter the license key when prompted
-3) Click Activate on this device
+3) Click Activate
 
 Need help? ${SUPPORT_EMAIL || "Reply to this email."}
 `;
 
-  await mailer.sendMail({
+  await resend.emails.send({
     from: MAIL_FROM,
     to,
     subject,
-    text,
+    text
   });
-}
 
+  console.log("EMAIL_SENT:", to);
+}
 
 const app = express();
 
@@ -107,7 +98,7 @@ app.post(
 
       const data = payload?.data;
       const attrs = data?.attributes || {};
-      const email = attrs?.user_email;
+      const email = String(attrs?.user_email || "").trim();
       const variantId =
       attrs?.first_order_item?.variant_id ||
       attrs?.variant_id;
