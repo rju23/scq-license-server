@@ -517,7 +517,7 @@ app.listen(PORT, () => {
 
 // ---------- Lemon Squeezy Webhook ----------
 app.post(
-  "/webhook/lemonsqueezy",
+  "/webhooks/lemonsqueezy",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
