@@ -268,6 +268,49 @@ async function createLicenseOrReturnExisting({ email, plan, maxDevices, source, 
   return ins.rows[0];
 }
 
+// ---------- License Validation (for app activation) ----------
+app.post("/api/validate-license", express.json(), async (req, res) => {
+  try {
+    const { licenseKey, deviceId } = req.body;
+
+    if (!licenseKey || !deviceId) {
+      return res.status(400).json({ error: "Missing licenseKey or deviceId" });
+    }
+
+    const result = await db(
+      `select * from public.licenses
+       where license_key = $1
+       limit 1`,
+      [licenseKey.trim()]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "License not found" });
+    }
+
+    const license = result.rows[0];
+
+    if (license.status !== "active") {
+      return res.status(403).json({ error: "License inactive" });
+    }
+
+    if (license.expires_at && new Date(license.expires_at) < new Date()) {
+      return res.status(403).json({ error: "License expired" });
+    }
+
+    return res.json({
+      valid: true,
+      plan: license.plan,
+      maxDevices: license.max_devices
+    });
+
+  } catch (err) {
+    console.error("License validation error:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 // ---------- Start ----------
 app.listen(PORT, () => {
   console.log(`SCQ License Server running on port ${PORT}`);
