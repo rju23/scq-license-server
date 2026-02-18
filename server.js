@@ -35,6 +35,7 @@ async function sendLicenseEmail({ to, licenseKey, plan, maxDevices }) {
   if (!resend) {
     console.warn("RESEND_API_KEY missing; email will not send.");
     return;
+    console.log("EMAIL: about to send", { to });
   }
 
   const subject = `${APP_NAME} — Your License Key`;
@@ -58,12 +59,22 @@ How to activate:
 Need help? ${SUPPORT_EMAIL || "Reply to this email."}
 `;
 
-  await resend.emails.send({
-    from: MAIL_FROM,
+  console.log("EMAIL: about to send", { to });
+
+
+try {
+  const resp = await resend.emails.send({
+    from: "SCQ Scoreboard <onboarding@resend.dev>",
     to,
-    subject,
-    text
+    subject: "Your SCQ License Key",
+    text: `Your license key is:\n\n${licenseKey}`
   });
+
+
+  console.log("EMAIL: resend response", resp);
+} catch (err) {
+  console.error("EMAIL: resend error", err);
+}
 
   console.log("EMAIL_SENT:", to);
 }
