@@ -514,3 +514,67 @@ app.post("/api/validate-license", express.json(), async (req, res) => {
 app.listen(PORT, () => {
   console.log(`SCQ License Server running on port ${PORT}`);
 });
+
+// ---------- Lemon Squeezy Webhook ----------
+app.post(
+  "/webhook/lemonsqueezy",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const rawBody = req.body;
+      const signature = req.headers["x-signature"];
+
+      if (!verifyLemonSignature(rawBody, signature)) {
+        console.error("Invalid Lemon signature");
+        return res.status(401).send("Invalid signature");
+      }
+
+      const payload = JSON.parse(rawBody.toString("utf8"));
+      const eventName = payload?.meta?.event_name;
+
+      // log webhook (non-fatal)
+      try {
+        await db(
+          `insert into public.webhook_events (event_name, payload_json)
+           values ($1, $2::jsonb)`,
+          [eventName, JSON.stringify(payload)]
+        );
+      } catch (e) {
+        console.error("webhook_events insert failed (ignored):", e?.message);
+      }
+
+      const data = payload?.data;
+      const attrs = data?.attributes || {};
+      const email = attrs?.user_email;
+      const variantId = attrs?.variant_id;
+
+      if (!data || !eventName) {
+        return res.status(200).send("No-op");
+      }
+
+      switch (eventName) {
+        case "order_created":
+          await handleOrderCreated({ email, variantId, attrs });
+          break;
+
+        case "subscription_created":
+        case "subscription_updated":
+          await handleSubscriptionUpsert({ email, variantId, attrs });
+          break;
+
+        case "subscription_cancelled":
+        case "subscription_expired":
+          await handleSubscriptionEnded({ attrs });
+          break;
+
+        default:
+          console.log("Unhandled event:", eventName);
+      }
+
+      return res.status(200).send("OK");
+    } catch (err) {
+      console.error("Webhook error:", err);
+      return res.status(500).send("Server error");
+    }
+  }
+);
