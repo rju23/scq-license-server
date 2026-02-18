@@ -65,7 +65,7 @@ app.post(
       // Save raw event for debugging
       await pool.query(
         `insert into webhook_events (event_name, payload_json)
-         values ($1, $2::jsonb)`,
+         values ($1, $2)`,
         [eventName || "unknown", JSON.stringify(payload)]
       );
 
