@@ -49,13 +49,13 @@ app.post(
 
       const hmac = crypto.createHmac("sha256", LS_WEBHOOK_SECRET);
       const digest = hmac.update(req.body).digest("hex");
-
-      if (!crypto.timingSafeEqual(
-        Buffer.from(digest, "utf8"),
-        Buffer.from(signature, "utf8")
-      )) {
+        // timingSafeEqual throws if lengths differ
+        const sigBuf = Buffer.from(String(signature), "utf8");
+        const digBuf = Buffer.from(String(digest), "utf8");
+        if (sigBuf.length !== digBuf.length || !crypto.timingSafeEqual(digBuf, sigBuf)) {
         return res.status(401).send("Invalid signature");
       }
+
 
       const payload = JSON.parse(req.body.toString("utf8"));
       const eventName = payload?.meta?.event_name;
@@ -112,20 +112,37 @@ app.post(
 // ===============================
 // VARIANT → PLAN MAPPING
 // ===============================
-function mapPlan(variantId) {
-  switch (Number(variantId)) {
-    case 1319003:
-      return { plan: "individual_monthly", maxDevices: 1 };
-    case 1319015:
-      return { plan: "individual_yearly", maxDevices: 1 };
-    case 1319016:
-      return { plan: "school_yearly", maxDevices: 3 };
-    case 1319022:
-      return { plan: "rally_3day", maxDevices: -1 }; // unlimited
-    default:
-      return null;
+function mapPlan(variantId, attrs = {}) {
+  const v = Number(variantId);
+
+  // Live variant IDs (your original)
+  if (v === 1319003) return { plan: "individual_monthly", maxDevices: 1 };
+  if (v === 1319015) return { plan: "individual_yearly",  maxDevices: 1 };
+  if (v === 1319016) return { plan: "school_yearly",       maxDevices: 3 };
+  if (v === 1319022) return { plan: "rally_3day",          maxDevices: -1 };
+
+  // Test mode variant IDs (we've now observed one of them)
+  if (v === 1319234) return { plan: "individual_monthly", maxDevices: 1 };
+
+  // Fallback mapping by product name (works across test/live)
+  const productName = String(attrs?.product_name || "").toLowerCase();
+
+  if (productName.includes("individual") && productName.includes("(monthly)")) {
+    return { plan: "individual_monthly", maxDevices: 1 };
   }
+  if (productName.includes("individual") && productName.includes("(yearly)")) {
+    return { plan: "individual_yearly", maxDevices: 1 };
+  }
+  if (productName.includes("school") && productName.includes("yearly")) {
+    return { plan: "school_yearly", maxDevices: 3 };
+  }
+  if (productName.includes("rally")) {
+    return { plan: "rally_3day", maxDevices: -1 };
+  }
+
+  return null;
 }
+
 
 // ===============================
 // LICENSE KEY GENERATOR
@@ -139,7 +156,7 @@ function generateLicenseKey() {
 // ORDER CREATED (Rally)
 // ===============================
 async function handleOrderCreated(variantId, email, attrs) {
-  const mapped = mapPlan(variantId);
+  const mapped = mapPlan(variantId, attrs);
   if (!mapped) return;
 
   const license = await createLicenseIfNotExists(
@@ -171,7 +188,7 @@ async function handleOrderCreated(variantId, email, attrs) {
 // SUBSCRIPTION CREATED / UPDATED
 // ===============================
 async function handleSubscriptionUpsert(variantId, email, attrs) {
-  const mapped = mapPlan(variantId);
+  const mapped = mapPlan(variantId, attrs);
   if (!mapped) return;
 
   const license = await createLicenseIfNotExists(
