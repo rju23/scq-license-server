@@ -395,6 +395,113 @@ app.use((req, res, next) => {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+// =========================================================
+// Feedback endpoint (Website -> License Server)
+// POST /v1/feedback
+// =========================================================
+
+const FEEDBACK_TO_EMAIL = process.env.FEEDBACK_TO_EMAIL || SUPPORT_EMAIL || "";
+const FEEDBACK_MIN_SECONDS = Number(process.env.FEEDBACK_MIN_SECONDS || 15);
+const FEEDBACK_ALLOW_ORIGIN = process.env.FEEDBACK_ALLOW_ORIGIN || "*";
+
+// lightweight in-memory rate limit (per IP) to reduce spam
+const feedbackLastByIp = new Map(); // ip -> ms
+
+function cleanStr(x, max = 2000) {
+  return String(x || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function isEmailLike(x) {
+  const s = String(x || "").trim();
+  if (!s) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+app.post("/v1/feedback", async (req, res) => {
+  try {
+    // CORS (optional tightening)
+    res.setHeader("Access-Control-Allow-Origin", FEEDBACK_ALLOW_ORIGIN);
+    res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+
+    // rate limit
+    const ip =
+      (req.headers["cf-connecting-ip"] ||
+        req.headers["x-forwarded-for"] ||
+        req.socket.remoteAddress ||
+        "") + "";
+    const now = Date.now();
+    const last = feedbackLastByIp.get(ip) || 0;
+    if (now - last < FEEDBACK_MIN_SECONDS * 1000) {
+      return res.status(429).json({ ok: false, error: "rate_limited" });
+    }
+    feedbackLastByIp.set(ip, now);
+
+    const name = cleanStr(req.body?.name, 120);
+    const emailRaw = cleanStr(req.body?.email, 160);
+    const email = isEmailLike(emailRaw) ? emailRaw : "";
+    const category = cleanStr(req.body?.category, 40) || "General";
+    const message = cleanStr(req.body?.message, 4000);
+    const appVersion = cleanStr(req.body?.appVersion, 80);
+    const pageUrl = cleanStr(req.body?.pageUrl, 300);
+    const userAgent = cleanStr(req.headers["user-agent"], 300);
+
+    if (!message || message.length < 5) {
+      return res.status(400).json({ ok: false, error: "message_required" });
+    }
+
+    // 1) Store in Postgres (recommended)
+    try {
+      await db(
+        `insert into public.feedback
+         (name, email, category, message, app_version, page_url, user_agent, ip)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [name || null, email || null, category, message, appVersion || null, pageUrl || null, userAgent || null, ip || null]
+      );
+    } catch (e) {
+      console.error("feedback insert failed (ignored):", e?.message || e);
+      // still continue to email
+    }
+
+    // 2) Email you the feedback (Resend)
+    if (!FEEDBACK_TO_EMAIL) {
+      return res.json({ ok: true, stored: true, emailed: false, note: "FEEDBACK_TO_EMAIL not set" });
+    }
+
+    const subject = `${APP_NAME} Feedback — ${category}`;
+    const text =
+`New feedback received
+
+Category: ${category}
+From: ${name || "(no name)"}${email ? ` <${email}>` : ""}
+App version: ${appVersion || "(not provided)"}
+Page: ${pageUrl || "(not provided)"}
+IP: ${ip || "(unknown)"}
+
+Message:
+${message}
+`;
+
+    const resp = await resend.emails.send({
+      from: MAIL_FROM,
+      to: FEEDBACK_TO_EMAIL,
+      subject,
+      text
+    });
+
+    if (resp?.error) {
+      console.error("feedback email failed:", resp.error);
+      return res.json({ ok: true, stored: true, emailed: false });
+    }
+
+    return res.json({ ok: true, stored: true, emailed: true, id: resp?.data?.id || null });
+  } catch (e) {
+    console.error("feedback route error:", e?.stack || e);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 // Validate license (does NOT consume a device slot)
 app.post("/v1/license/validate", async (req, res) => {
   try {
