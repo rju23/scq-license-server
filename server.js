@@ -640,6 +640,50 @@ app.post("/v1/license/activate", async (req, res) => {
   }
 });
 
+app.post("/admin/grant-license", async (req, res) => {
+  try {
+    const { email, days, lifetime } = req.body;
+
+    // 🔐 SECURITY CHECK
+    const secret = req.headers["x-admin-secret"];
+    if (secret !== process.env.ADMIN_SECRET) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const licenseKey = crypto.randomUUID();
+
+    let expiresAt = null;
+
+    if (!lifetime) {
+      expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + (days || 30));
+    }
+
+    await pool.query(
+      `INSERT INTO licenses (
+        license_key,
+        email,
+        plan,
+        max_devices,
+        status,
+        expires_at,
+        source
+      ) VALUES ($1, $2, 'premium', 1, 'active', $3, 'manual')`,
+      [licenseKey, email, expiresAt]
+    );
+
+    res.json({
+      success: true,
+      licenseKey,
+      expiresAt
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "server error" });
+  }
+});
+
 // ---------- Start ----------
 app.listen(PORT, () => {
   console.log(`SCQ License Server running on port ${PORT}`);
