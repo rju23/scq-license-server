@@ -640,17 +640,38 @@ app.post("/v1/license/activate", async (req, res) => {
   }
 });
 
-app.post("/admin/grant-license", async (req, res) => {
+app.post("/v1/admin/grant-license", async (req, res) => {
   try {
     const { email, days, lifetime } = req.body;
 
     // 🔐 SECURITY CHECK
     const secret = req.headers["x-admin-secret"];
-    if (secret !== process.env.ADMIN_SECRET) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
+
+    if (!secret || secret !== process.env.ADMIN_SECRET) {
+      console.warn("UNAUTHORIZED ADMIN ATTEMPT", {
+        ip: req.ip,
+        time: new Date().toISOString()
+      });
+
+  return res.status(403).json({ error: "Forbidden" });
+}
 
     const licenseKey = crypto.randomUUID();
+
+    const existing = await db(
+  `select * from public.licenses
+   where email = $1 and status = 'active' and plan = 'premium'
+   limit 1`,
+  [email]
+);
+
+if (existing.rows.length) {
+  return res.json({
+    success: true,
+    message: "User already has active premium",
+    licenseKey: existing.rows[0].license_key
+  });
+}
 
     let expiresAt = null;
 
