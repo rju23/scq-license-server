@@ -104,9 +104,9 @@ const LIVE_VARIANTS = {
   individual_yearly: 1319015,
   school_yearly: 1319016,
   rally_3day: 1319022,
-  offseason_pass: null,
-  junior_season_pass: null,
-  senior_season_pass: null,
+  offseason_pass: 1625875,
+  junior_season_pass: 1625910,
+  senior_season_pass: 1625931,
 };
 
 // Add test ids as you observe them
