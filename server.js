@@ -72,6 +72,12 @@ function planLabel(plan) {
       return "School (Yearly)";
     case "rally_3day":
       return "Rally (3-day)";
+    case "offseason_pass":
+      return "Off-season Pass";
+    case "junior_season_pass":
+      return "Junior Season Pass";
+    case "senior_season_pass":
+      return "Senior Season Pass";  
     default:
       return plan || "Unknown";
   }
@@ -98,6 +104,9 @@ const LIVE_VARIANTS = {
   individual_yearly: 1319015,
   school_yearly: 1319016,
   rally_3day: 1319022,
+  offseason_pass: 0000000,
+  junior_season_pass: 0000000,
+  senior_season_pass: 0000000,
 };
 
 // Add test ids as you observe them
@@ -114,6 +123,14 @@ function mapPlanFromWebhook(variantId, attrs = {}) {
   if (v === LIVE_VARIANTS.individual_yearly) return { plan: "individual_yearly", maxDevices: 1 };
   if (v === LIVE_VARIANTS.school_yearly) return { plan: "school_yearly", maxDevices: 3 };
   if (v === LIVE_VARIANTS.rally_3day) return { plan: "rally_3day", maxDevices: -1 };
+  if (v === LIVE_VARIANTS.offseason_pass)
+  return { plan: "offseason_pass", maxDevices: 1 };
+
+if (v === LIVE_VARIANTS.junior_season_pass)
+  return { plan: "junior_season_pass", maxDevices: 1 };
+
+if (v === LIVE_VARIANTS.senior_season_pass)
+  return { plan: "senior_season_pass", maxDevices: 1 };
 
   // test ids (known)
   if (v === TEST_VARIANTS.individual_monthly) return { plan: "individual_monthly", maxDevices: 1 };
@@ -237,6 +254,36 @@ async function handleOrderCreated({ email, variantId, attrs }) {
     }
   }
 
+  const currentYear = new Date().getFullYear();
+
+let startsAt = null;
+let expiresAt = null;
+
+if (mapped.plan === "offseason_pass") {
+  startsAt = new Date(`${currentYear}-04-20T00:00:00Z`);
+  expiresAt = new Date(`${currentYear}-06-30T23:59:59Z`);
+}
+
+if (mapped.plan === "junior_season_pass") {
+  startsAt = new Date(`${currentYear}-07-01T00:00:00Z`);
+  expiresAt = new Date(`${currentYear}-08-31T23:59:59Z`);
+}
+
+if (mapped.plan === "senior_season_pass") {
+  startsAt = new Date(`${currentYear}-09-01T00:00:00Z`);
+  expiresAt = new Date(`${currentYear}-12-31T23:59:59Z`);
+}
+
+  if (startsAt && expiresAt) {
+  await db(
+    `update public.licenses
+     set starts_at = $1,
+         expires_at = $2
+     where id = $3`,
+    [startsAt.toISOString(), expiresAt.toISOString(), license.id]
+  );
+}
+  
   // Rally: 3-day usage, must be activated within 7 days of purchase
   if (mapped.plan === "rally_3day") {
     const purchaseAt = attrs?.created_at ? new Date(attrs.created_at) : new Date();
@@ -509,7 +556,7 @@ app.post("/v1/license/validate", async (req, res) => {
     if (!licenseKey) return res.status(400).json({ ok: false, error: "licenseKey required" });
 
     const r = await db(
-      `select license_key, plan, status, expires_at, max_devices
+      `select license_key, plan, status, starts_at, expires_at, max_devices
        from public.licenses
        where license_key = $1
        limit 1`,
@@ -521,6 +568,14 @@ app.post("/v1/license/validate", async (req, res) => {
     const lic = r.rows[0];
     if (String(lic.status).toLowerCase() !== "active") {
       return res.status(403).json({ ok: false, error: "License inactive" });
+    }
+
+    if (lic.starts_at && new Date(lic.starts_at).getTime() > Date.now()) {
+  return res.status(403).json({
+    ok: false,
+    error: "Season has not started yet",
+    startsAt: lic.starts_at
+  });
     }
     if (lic.expires_at && new Date(lic.expires_at).getTime() <= Date.now()) {
       return res.status(403).json({ ok: false, error: "License expired", expiresAt: lic.expires_at });
@@ -563,7 +618,7 @@ app.post("/v1/license/activate", async (req, res) => {
     if (!deviceId) return res.status(400).json({ ok: false, error: "deviceId required" });
 
     const lr = await db(
-      `select plan, status, expires_at, max_devices
+      `select plan, status, starts_at, expires_at, max_devices
        from public.licenses
        where license_key = $1
        limit 1`,
@@ -575,6 +630,13 @@ app.post("/v1/license/activate", async (req, res) => {
 
     if (String(lic.status).toLowerCase() !== "active") {
       return res.status(403).json({ ok: false, error: "License inactive" });
+    }
+    if (lic.starts_at && new Date(lic.starts_at).getTime() > Date.now()) {
+  return res.status(403).json({
+    ok: false,
+    error: "Season has not started yet",
+    startsAt: lic.starts_at
+  });
     }
     if (lic.expires_at && new Date(lic.expires_at).getTime() <= Date.now()) {
       return res.status(403).json({ ok: false, error: "License expired", expiresAt: lic.expires_at });
