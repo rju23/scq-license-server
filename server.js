@@ -112,6 +112,9 @@ const LIVE_VARIANTS = {
 // Add test ids as you observe them
 const TEST_VARIANTS = {
   individual_monthly: 1319234,
+  offseason_pass: 1625939,
+  junior_season_pass: 1625940,
+  senior_season_pass: 1625941,
 };
 
 // Map variant ID OR fallback by product_name (works in test/live)
