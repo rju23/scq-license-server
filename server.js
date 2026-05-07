@@ -137,6 +137,12 @@ if (v === LIVE_VARIANTS.senior_season_pass)
 
   // test ids (known)
   if (v === TEST_VARIANTS.individual_monthly) return { plan: "individual_monthly", maxDevices: 1 };
+  if (v === TEST_VARIANTS.offseason_pass)
+  return { plan: "offseason_pass", maxDevices: 1 };
+  if (v === TEST_VARIANTS.junior_season_pass)
+  return { plan: "junior_season_pass", maxDevices: 1 };
+  if (v === TEST_VARIANTS.senior_season_pass)
+  return { plan: "senior_season_pass", maxDevices: 1 };
 
   // fallback by product name (stable across test/live)
   const pn = safeLower(attrs?.product_name);
