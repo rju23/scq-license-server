@@ -1,9 +1,8 @@
-// server.js — SCQ License Server (Railway + Postgres + Lemon Squeezy + Resend)
-// - Verifies Lemon Squeezy HMAC signature
-// - Logs webhook_events (non-fatal if it fails)
-// - Creates licenses for order_created + subscription_created/updated
+// server.js — SCQ License Server (Railway + Postgres + Resend)
+// - Manual license creation via admin endpoints
 // - Tracks activations (device limits)
-// - Emails license key to customer using Resend (verified domain required)
+// - Feature pack granting per license
+// - Emails license key to customer using Resend
 
 import express from "express";
 import crypto from "node:crypto";
@@ -16,7 +15,6 @@ const APP_NAME = process.env.APP_NAME || "SCQ Scoreboard";
 
 // REQUIRED
 const DATABASE_URL = process.env.DATABASE_URL;
-const LS_WEBHOOK_SECRET = process.env.LS_WEBHOOK_SECRET;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const MAIL_FROM = process.env.MAIL_FROM; // e.g. SCQ Scoreboard <support@scqscoreboard.com>
 
@@ -25,7 +23,6 @@ const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || ""; // used in email body onl
 const PORT = Number(process.env.PORT || 8080);
 
 if (!DATABASE_URL) throw new Error("DATABASE_URL is missing.");
-if (!LS_WEBHOOK_SECRET) throw new Error("LS_WEBHOOK_SECRET is missing.");
 if (!RESEND_API_KEY) throw new Error("RESEND_API_KEY is missing.");
 if (!MAIL_FROM) throw new Error("MAIL_FROM is missing (must be verified domain).");
 
@@ -62,98 +59,6 @@ function generateLicenseKey() {
   return `SCQ-${part()}${part()}-${part()}${part()}-${part()}${part()}`;
 }
 
-function planLabel(plan) {
-  switch (plan) {
-    case "individual_monthly":
-      return "Individual (Monthly)";
-    case "individual_yearly":
-      return "Individual (Yearly)";
-    case "school_yearly":
-      return "School (Yearly)";
-    case "rally_3day":
-      return "Rally (3-day)";
-    case "offseason_pass":
-      return "Off-season Pass";
-    case "junior_season_pass":
-      return "Junior Season Pass";
-    case "senior_season_pass":
-      return "Senior Season Pass";  
-    default:
-      return plan || "Unknown";
-  }
-}
-
-// Lemon signature verification (HMAC SHA256 of raw body, hex digest)
-function verifyLemonSignature(rawBodyBuf, signatureHeader) {
-  const signature = String(signatureHeader || "");
-  if (!signature) return false;
-
-  const hmac = crypto.createHmac("sha256", LS_WEBHOOK_SECRET);
-  const digest = hmac.update(rawBodyBuf).digest("hex");
-
-  const sigBuf = Buffer.from(signature, "utf8");
-  const digBuf = Buffer.from(digest, "utf8");
-  if (sigBuf.length !== digBuf.length) return false;
-
-  return crypto.timingSafeEqual(digBuf, sigBuf);
-}
-
-// ---------- Variant mapping ----------
-const LIVE_VARIANTS = {
-  individual_monthly: 1319003,
-  individual_yearly: 1319015,
-  school_yearly: 1319016,
-  rally_3day: 1319022,
-  offseason_pass: 1625875,
-  junior_season_pass: 1625910,
-  senior_season_pass: 1625931,
-};
-
-// Add test ids as you observe them
-const TEST_VARIANTS = {
-  individual_monthly: 1319234,
-  offseason_pass: 1625939,
-  junior_season_pass: 1625940,
-  senior_season_pass: 1625941,
-};
-
-// Map variant ID OR fallback by product_name (works in test/live)
-function mapPlanFromWebhook(variantId, attrs = {}) {
-  const v = Number(variantId || 0);
-
-  // live ids
-  if (v === LIVE_VARIANTS.individual_monthly) return { plan: "individual_monthly", maxDevices: 1 };
-  if (v === LIVE_VARIANTS.individual_yearly) return { plan: "individual_yearly", maxDevices: 1 };
-  if (v === LIVE_VARIANTS.school_yearly) return { plan: "school_yearly", maxDevices: 3 };
-  if (v === LIVE_VARIANTS.rally_3day) return { plan: "rally_3day", maxDevices: -1 };
-  if (v === LIVE_VARIANTS.offseason_pass)
-  return { plan: "offseason_pass", maxDevices: 1 };
-
-if (v === LIVE_VARIANTS.junior_season_pass)
-  return { plan: "junior_season_pass", maxDevices: 1 };
-
-if (v === LIVE_VARIANTS.senior_season_pass)
-  return { plan: "senior_season_pass", maxDevices: 1 };
-
-  // test ids (known)
-  if (v === TEST_VARIANTS.individual_monthly) return { plan: "individual_monthly", maxDevices: 1 };
-  if (v === TEST_VARIANTS.offseason_pass)
-  return { plan: "offseason_pass", maxDevices: 1 };
-  if (v === TEST_VARIANTS.junior_season_pass)
-  return { plan: "junior_season_pass", maxDevices: 1 };
-  if (v === TEST_VARIANTS.senior_season_pass)
-  return { plan: "senior_season_pass", maxDevices: 1 };
-
-  // fallback by product name (stable across test/live)
-  const pn = safeLower(attrs?.product_name);
-  if (pn.includes("individual") && pn.includes("(monthly)")) return { plan: "individual_monthly", maxDevices: 1 };
-  if (pn.includes("individual") && pn.includes("(yearly)")) return { plan: "individual_yearly", maxDevices: 1 };
-  if (pn.includes("school") && pn.includes("yearly")) return { plan: "school_yearly", maxDevices: 3 };
-  if (pn.includes("rally")) return { plan: "rally_3day", maxDevices: -1 };
-
-  return null;
-}
-
 // ---------- Email ----------
 async function sendLicenseEmail({ to, licenseKey, plan, maxDevices }) {
   const subject = `${APP_NAME} — Your License Key`;
@@ -166,7 +71,7 @@ Thanks for your purchase.
 License key:
 ${licenseKey}
 
-Plan: ${planLabel(plan)}
+Plan: Core License
 Devices allowed: ${maxDevices === -1 ? "Unlimited" : maxDevices}
 
 How to activate:
@@ -196,258 +101,8 @@ Need help? ${SUPPORT_EMAIL || "Reply to this email."}
   console.log("EMAIL_SENT:", { to, id: resp?.data?.id });
 }
 
-// ---------- License creation ----------
-async function createLicenseOrReturnExisting({ email, plan, maxDevices, source, sourceId }) {
-  // 1) By source+sourceId (best)
-  if (source && sourceId) {
-    const bySource = await db(
-      `select * from public.licenses
-       where source = $1 and source_id = $2
-       limit 1`,
-      [source, sourceId]
-    );
-    if (bySource.rows.length) return { license: bySource.rows[0], created: false };
-  }
-
-  // 2) Existing active by email+plan
-  const existing = await db(
-    `select * from public.licenses
-     where email = $1 and plan = $2 and status = 'active'
-     order by id desc
-     limit 1`,
-    [email, plan]
-  );
-  if (existing.rows.length) return { license: existing.rows[0], created: false };
-
-  // 3) Create new
-  const key = generateLicenseKey();
-  const ins = await db(
-    `insert into public.licenses
-     (license_key, email, plan, max_devices, status, source, source_id)
-     values ($1, $2, $3, $4, 'active', $5, $6)
-     returning *`,
-    [key, email, plan, Number(maxDevices), source || null, sourceId || null]
-  );
-
-  return { license: ins.rows[0], created: true };
-}
-
-// ---------- Handlers ----------
-async function handleOrderCreated({ email, variantId, attrs }) {
-  const mapped = mapPlanFromWebhook(variantId, attrs);
-  if (!mapped) {
-    console.warn("Unmapped order variantId/product:", variantId, attrs?.product_name);
-    return;
-  }
-
-  const sourceId = String(attrs?.identifier || attrs?.order_number || attrs?.id || "");
-
-  const { license, created } = await createLicenseOrReturnExisting({
-    email,
-    plan: mapped.plan,
-    maxDevices: mapped.maxDevices,
-    source: "order",
-    sourceId,
-  });
-
-  if (created) {
-    try {
-      await sendLicenseEmail({
-        to: email,
-        licenseKey: license.license_key,
-        plan: license.plan,
-        maxDevices: license.max_devices,
-      });
-    } catch (e) {
-      console.error("Failed to send license email (order):", e?.message || e);
-    }
-  }
-
-  const currentYear = new Date().getFullYear();
-
-let startsAt = null;
-let expiresAt = null;
-
-if (mapped.plan === "offseason_pass") {
-  startsAt = new Date(`${currentYear}-04-20T00:00:00Z`);
-  expiresAt = new Date(`${currentYear}-06-30T23:59:59Z`);
-}
-
-if (mapped.plan === "junior_season_pass") {
-  startsAt = new Date(`${currentYear}-07-01T00:00:00Z`);
-  expiresAt = new Date(`${currentYear}-08-31T23:59:59Z`);
-}
-
-if (mapped.plan === "senior_season_pass") {
-  startsAt = new Date(`${currentYear}-09-01T00:00:00Z`);
-  expiresAt = new Date(`${currentYear}-12-31T23:59:59Z`);
-}
-
-  if (startsAt && expiresAt) {
-  await db(
-    `update public.licenses
-     set starts_at = $1,
-         expires_at = $2
-     where id = $3`,
-    [startsAt.toISOString(), expiresAt.toISOString(), license.id]
-  );
-}
-  
-  // Rally: 3-day usage, must be activated within 7 days of purchase
-  if (mapped.plan === "rally_3day") {
-    const purchaseAt = attrs?.created_at ? new Date(attrs.created_at) : new Date();
-    const activationDeadline = new Date(purchaseAt.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-    await db(
-      `update public.licenses
-       set rally_purchase_at = $1,
-           rally_activation_deadline = $2
-       where id = $3`,
-      [purchaseAt.toISOString(), activationDeadline.toISOString(), license.id]
-    );
-  }
-}
-
-async function handleSubscriptionUpsert({ email, variantId, attrs }) {
-  const mapped = mapPlanFromWebhook(variantId, attrs);
-  if (!mapped) {
-    console.warn("Unmapped subscription variantId/product:", variantId, attrs?.product_name);
-    return;
-  }
-
-  const subId = String(attrs?.id || "");
-
-  const { license, created } = await createLicenseOrReturnExisting({
-    email,
-    plan: mapped.plan,
-    maxDevices: mapped.maxDevices,
-    source: "subscription",
-    sourceId: subId,
-  });
-
-  if (created) {
-    try {
-      await sendLicenseEmail({
-        to: email,
-        licenseKey: license.license_key,
-        plan: license.plan,
-        maxDevices: license.max_devices,
-      });
-    } catch (e) {
-      console.error("Failed to send license email (subscription):", e?.message || e);
-    }
-  }
-
-  // Update status/expiry from subscription
-  const status = String(attrs?.status || "").toLowerCase();
-  const renewsAt = attrs?.renews_at ? new Date(attrs.renews_at) : null;
-  const endsAt = attrs?.ends_at ? new Date(attrs.ends_at) : null;
-  const expiry = endsAt || renewsAt;
-
-  const nextStatus = status === "active" || status === "on_trial" ? "active" : "inactive";
-
-  await db(
-    `update public.licenses
-     set status = $1,
-         expires_at = $2
-     where id = $3`,
-    [nextStatus, expiry ? expiry.toISOString() : null, license.id]
-  );
-}
-
-async function handleSubscriptionEnded({ attrs }) {
-  const subId = String(attrs?.id || "");
-  if (!subId) return;
-
-  await db(
-    `update public.licenses
-     set status = 'inactive'
-     where source = 'subscription'
-       and source_id = $1`,
-    [subId]
-  );
-}
-
 // ---------- Express app ----------
 const app = express();
-
-// Lemon webhook needs RAW body for signature check
-app.post(
-  "/webhooks/lemonsqueezy",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    try {
-      const rawBody = req.body;
-      const signature = req.headers["x-signature"];
-
-      if (!verifyLemonSignature(rawBody, signature)) {
-        console.error("Invalid Lemon signature");
-        return res.status(401).send("Invalid signature");
-      }
-
-      const payload = JSON.parse(rawBody.toString("utf8"));
-      const eventName = payload?.meta?.event_name;
-
-      const data = payload?.data;
-      const attrs = data?.attributes || {};
-
-      const email = String(attrs?.user_email || "").trim();
-      const variantId = attrs?.first_order_item?.variant_id || attrs?.variant_id;
-
-      // log webhook (non-fatal)
-      try {
-        await db(
-          `insert into public.webhook_events (event_name, payload_json)
-           values ($1, $2::jsonb)`,
-          [eventName, JSON.stringify(payload)]
-        );
-      } catch (e) {
-        console.error("webhook_events insert failed (ignored):", e?.message);
-      }
-
-      if (!data || !eventName) {
-        return res.status(200).send("No-op");
-      }
-
-      switch (eventName) {
-        case "order_created":
-          await handleOrderCreated({ email, variantId, attrs });
-          break;
-
-        case "subscription_created":
-        case "subscription_updated":
-          await handleSubscriptionUpsert({ email, variantId, attrs });
-          break;
-
-        case "subscription_cancelled":
-        case "subscription_expired":
-          await handleSubscriptionEnded({ attrs });
-          break;
-
-        default:
-          console.log("Unhandled event:", eventName);
-      }
-
-      return res.status(200).send("OK");
-    } catch (err) {
-      console.error("Webhook error:", err?.stack || err);
-      return res.status(500).send("Server error");
-    }
-  }
-);
-
-// JSON endpoints (after webhook raw route)
-app.use(express.json({ limit: "1mb" }));
-
-// TEMP CORS (for local test-license.html)
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -627,7 +282,7 @@ app.post("/v1/license/activate", async (req, res) => {
     if (!deviceId) return res.status(400).json({ ok: false, error: "deviceId required" });
 
     const lr = await db(
-      `select plan, status, starts_at, expires_at, max_devices
+      `select plan, status, starts_at, expires_at, max_devices, features
        from public.licenses
        where license_key = $1
        limit 1`,
@@ -700,6 +355,7 @@ app.post("/v1/license/activate", async (req, res) => {
     return res.json({
       ok: true,
       plan: lic.plan,
+      features: lic.features || [],
       maxDevices: max,
       usedDevices: used2,
       remainingDevices: max === -1 ? 999999 : Math.max(0, max - used2),
@@ -713,7 +369,7 @@ app.post("/v1/license/activate", async (req, res) => {
 
 app.post("/v1/admin/grant-license", async (req, res) => {
   try {
-    const { email, days, lifetime } = req.body;
+    const { email } = req.body;
 
     // 🔐 SECURITY CHECK
     const secret = req.headers["x-admin-secret"];
@@ -727,11 +383,11 @@ app.post("/v1/admin/grant-license", async (req, res) => {
   return res.status(403).json({ error: "Forbidden" });
 }
 
-    const licenseKey = crypto.randomUUID();
+    const licenseKey = generateLicenseKey();
 
     const existing = await db(
   `select * from public.licenses
-   where email = $1 and status = 'active' and plan = 'premium'
+   where email = $1 and status = 'active' and plan = 'core'
    limit 1`,
   [email]
 );
@@ -744,35 +400,98 @@ if (existing.rows.length) {
   });
 }
 
-    let expiresAt = null;
-
-    if (!lifetime) {
-      expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + (days || 30));
-    }
-
     await pool.query(
-      `INSERT INTO licenses (
-        license_key,
-        email,
-        plan,
-        max_devices,
-        status,
-        expires_at,
-        source
-      ) VALUES ($1, $2, 'premium', 1, 'active', $3, 'manual')`,
-      [licenseKey, email, expiresAt]
-    );
+  `INSERT INTO licenses (
+    license_key,
+    email,
+    plan,
+    max_devices,
+    status,
+    expires_at,
+    source,
+    features
+  ) VALUES ($1, $2, 'core', 2, 'active', $3, 'manual', '[]'::jsonb)`,
+  [licenseKey, email, null]
+);
 
     res.json({
-      success: true,
-      licenseKey,
-      expiresAt
-    });
+  success: true,
+  licenseKey
+});
 
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "server error" });
+  }
+});
+
+// =========================================================
+// Grant a feature pack to an existing license
+// POST /v1/admin/grant-feature
+// Headers: x-admin-secret
+// Body: { email, feature }
+// =========================================================
+app.post("/v1/admin/grant-feature", async (req, res) => {
+  try {
+    const secret = req.headers["x-admin-secret"];
+    if (!secret || secret !== process.env.ADMIN_SECRET) {
+      console.warn("UNAUTHORIZED ADMIN ATTEMPT", {
+        ip: req.ip,
+        time: new Date().toISOString()
+      });
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const { email, feature } = req.body;
+
+    if (!email || !feature) {
+      return res.status(400).json({ error: "email and feature are required" });
+    }
+
+    // Find their active core license
+    const lr = await db(
+      `SELECT id, features FROM public.licenses
+       WHERE email = $1 AND status = 'active' AND plan = 'core'
+       LIMIT 1`,
+      [safeLower(email)]
+    );
+
+    if (!lr.rows.length) {
+      return res.status(404).json({ error: "No active core license found for this email" });
+    }
+
+    const lic = lr.rows[0];
+    const currentFeatures = lic.features || [];
+
+    // Don't add duplicates
+    if (currentFeatures.includes(feature)) {
+      return res.json({
+        ok: true,
+        message: "Feature already granted",
+        features: currentFeatures
+      });
+    }
+
+    const updatedFeatures = [...currentFeatures, feature];
+
+    await db(
+      `UPDATE public.licenses
+       SET features = $1::jsonb
+       WHERE id = $2`,
+      [JSON.stringify(updatedFeatures), lic.id]
+    );
+
+    return res.json({
+      ok: true,
+      message: "Feature granted successfully",
+      email,
+      feature,
+      features: updatedFeatures
+    });
+
+  } catch (err) {
+    console.error("grant-feature error:", err?.stack || err);
+    return res.status(500).json({ error: "server_error" });
   }
 });
 
