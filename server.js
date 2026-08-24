@@ -448,6 +448,35 @@ app.post("/v1/license/verify-device", async (req, res) => {
   }
 });
 
+// =========================================================
+// Deactivate device (frees up a device slot)
+// POST /v1/license/deactivate
+// Body: { licenseKey, deviceId }
+// =========================================================
+app.post("/v1/license/deactivate", async (req, res) => {
+  try {
+    const licenseKey = String(req.body?.licenseKey || "").trim();
+    const deviceId = String(req.body?.deviceId || "").trim();
+
+    if (!licenseKey || !deviceId) {
+      return res.status(400).json({ ok: false, error: "missing_fields" });
+    }
+
+    // Remove the device activation record
+    await db(
+      `DELETE FROM public.activations
+       WHERE license_key = $1 AND device_id = $2`,
+      [licenseKey, deviceId]
+    );
+
+    return res.json({ ok: true, message: "Device deactivated successfully" });
+
+  } catch (e) {
+    console.error("deactivate error:", e?.stack || e);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 app.post("/v1/admin/grant-license", async (req, res) => {
   try {
     const { email } = req.body;
