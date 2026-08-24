@@ -378,6 +378,76 @@ app.post("/v1/license/activate", async (req, res) => {
   }
 });
 
+// =========================================================
+// Verify device against license (periodic check from app)
+// POST /v1/license/verify-device
+// Body: { licenseKey, deviceId }
+// =========================================================
+app.post("/v1/license/verify-device", async (req, res) => {
+  try {
+    const licenseKey = String(req.body?.licenseKey || "").trim();
+    const deviceId = String(req.body?.deviceId || "").trim();
+
+    if (!licenseKey || !deviceId) {
+      return res.status(400).json({ ok: false, error: "missing_fields" });
+    }
+
+    // Check license exists and is active
+    const lr = await db(
+      `SELECT plan, status, starts_at, expires_at, max_devices, features
+       FROM public.licenses
+       WHERE license_key = $1
+       LIMIT 1`,
+      [licenseKey]
+    );
+
+    if (!lr.rows.length) {
+      return res.status(404).json({ ok: false, active: false, error: "license_not_found" });
+    }
+
+    const lic = lr.rows[0];
+
+    if (String(lic.status).toLowerCase() !== "active") {
+      return res.status(200).json({ ok: true, active: false, reason: "license_inactive" });
+    }
+
+    if (lic.expires_at && new Date(lic.expires_at).getTime() <= Date.now()) {
+      return res.status(200).json({ ok: true, active: false, reason: "license_expired" });
+    }
+
+    // Check device is registered
+    const dr = await db(
+      `SELECT id FROM public.activations
+       WHERE license_key = $1 AND device_id = $2
+       LIMIT 1`,
+      [licenseKey, deviceId]
+    );
+
+    if (!dr.rows.length) {
+      return res.status(200).json({ ok: true, active: false, reason: "device_not_registered" });
+    }
+
+    // Update last seen
+    await db(
+      `UPDATE public.activations
+       SET last_seen_at = now()
+       WHERE license_key = $1 AND device_id = $2`,
+      [licenseKey, deviceId]
+    );
+
+    return res.json({
+      ok: true,
+      active: true,
+      plan: lic.plan,
+      features: lic.features || [],
+    });
+
+  } catch (e) {
+    console.error("verify-device error:", e?.stack || e);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 app.post("/v1/admin/grant-license", async (req, res) => {
   try {
     const { email } = req.body;
