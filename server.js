@@ -342,9 +342,9 @@ app.post("/v1/license/activate", async (req, res) => {
       }
 
       await db(
-        `insert into public.activations (license_key, device_id, device_label, last_seen_at)
-         values ($1,$2,$3,now())`,
-        [licenseKey, deviceId, deviceLabel]
+        `insert into public.activations (license_key, device_id, device_label, hardware_id, last_seen_at)
+         values ($1,$2,$3,$4,now())`,
+        [licenseKey, deviceId, deviceLabel, req.body?.hardwareId || null]
       );
     } else {
       await db(
@@ -416,15 +416,22 @@ app.post("/v1/license/verify-device", async (req, res) => {
     }
 
     // Check device is registered
+    const hardwareId = String(req.body?.hardwareId || "").trim();
     const dr = await db(
-      `SELECT id FROM public.activations
+      `SELECT id, hardware_id FROM public.activations
        WHERE license_key = $1 AND device_id = $2
        LIMIT 1`,
       [licenseKey, deviceId]
     );
-
+    
     if (!dr.rows.length) {
       return res.status(200).json({ ok: true, active: false, reason: "device_not_registered" });
+    }
+    
+    // If hardware_id is stored, verify it matches
+    const storedHardwareId = dr.rows[0]?.hardware_id;
+    if (storedHardwareId && hardwareId && storedHardwareId !== hardwareId) {
+      return res.status(200).json({ ok: true, active: false, reason: "hardware_mismatch" });
     }
 
     // Update last seen
