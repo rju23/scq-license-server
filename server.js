@@ -488,7 +488,7 @@ app.post("/v1/license/deactivate", async (req, res) => {
 
 app.post("/v1/admin/grant-license", async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, maxDevices } = req.body;
 
     // 🔐 SECURITY CHECK
     const secret = req.headers["x-admin-secret"];
@@ -529,8 +529,8 @@ if (existing.rows.length) {
     expires_at,
     source,
     features
-  ) VALUES ($1, $2, 'core', 2, 'active', $3, 'manual', '[]'::jsonb)`,
-  [licenseKey, email, null]
+  VALUES ($1, $2, 'core', $4, 'active', $3, 'manual', '[]'::jsonb)`,
+[licenseKey, email, null, Number(maxDevices) || 1]
 );
 
     res.json({
