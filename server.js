@@ -349,9 +349,11 @@ app.post("/v1/license/activate", async (req, res) => {
     } else {
       await db(
         `update public.activations
-         set last_seen_at=now(), device_label=coalesce($3, device_label)
+         set last_seen_at=now(), 
+             device_label=coalesce($3, device_label),
+             hardware_id=coalesce($4, hardware_id)
          where license_key=$1 and device_id=$2`,
-        [licenseKey, deviceId, deviceLabel]
+        [licenseKey, deviceId, deviceLabel, req.body?.hardwareId || null]
       );
     }
 
